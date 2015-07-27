@@ -11,16 +11,15 @@ from twisted.python import log
 
 
 def format_address(host, port):
+    if host and port:
+        return ("%s:%d") % (check_address(host), port)
 
-    def check_address(addr):
+def check_address(addr):
         try:
             socket.inet_aton(addr)
             return addr
         except socket.error:
             return '127.0.0.1'
-
-    if host and port:
-        return ("%s:%d") % (check_address(host), port)
 
 def parse_args():
     parser = argparse.argumentParser()
@@ -41,12 +40,13 @@ def parse_args():
 
 class Host(object):
 
-    def __init__(self, process_id, addr='127.0.0.1', port=8000):
+    def __init__(self, process_id = uuid.uuid1(), addr='127.0.0.1', port=8000): # Pad processId for serialization
         self.processId = process_id
-        self.addr = addr
+        self.addr = check_address(addr)
         self.port = port
 
-    def serialize(self):
+    @property
+    def serialized(self):
         return struct.pack("!16s4sh", self.processId.bytes,
                             socket.inet_aton(self.addr), self.port)
 
@@ -56,6 +56,18 @@ class Host(object):
         self.processId = uuid.UUID(bytes=proc_id)
         self.addr = socket.inet_ntoa(addr)
 
+    def __repr__(self):
+        return "PID: %s addr: %s port: %d" % (str(self.processId), self.addr, self.port)
+
+    def __hash__(self):
+        return hash(repr(self))
+
+    def __eq__(self, other):
+        return repr(other) == repr(self)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
 
 class MemberStorage(object):
     members = []
@@ -64,8 +76,18 @@ class MemberStorage(object):
     def serialized(self):
         result = ''
         for host in self.members:
-            result += host.serialize()
+            result += host.serialized
         return result
+
+    def deserialize(self, data):
+        buffer, data = data[:22], data[22:]
+        while (len(data)!=0):
+            host = Host()
+            host.deserialize(buffer)
+            self.host_alive(host)
+            buffer, data = data[:22], data[22:]
+
+
 
     def host_alive(self, host):
         if host not in self.members:
@@ -118,7 +140,7 @@ class SWIMProtocol(protocol.DatagramProtocol):
     membership_list = MemberStorage()
     notifications = []
 
-    def datagramReceived(self   , data, (host, port)):
+    def datagramReceived(self, data, (host, port)):
 
         if data[:2] != self.SWIM_PROTO: #Check if SWIM message
             return
@@ -179,33 +201,60 @@ class SWIMProtocol(protocol.DatagramProtocol):
 
 
 
-class JoinServer(protocol.Protocol):
+class JoinServerProtocol(protocol.Protocol):
     """
     This class is used to transfer the membership list over TCP
     after a peer joins
     """
     def __init__(self, membership):
-        self.membership = membership_list
+        self.membership = membership
 
     def connectionMade(self):
-        self.transport.write(self.swimprotocol.membership_list.serialized)
+        self.transport.write(self.membership.serialized)
         self.transport.loseConnection()
 
 class JoinServerFactory(protocol.Protocol):
     """
     Factory class for the Join Server
     """
-    protocol = JoinServer
+    protocol = JoinServerProtocol
 
 
-class JoinClient(protocol.Protocol):
-    def connectionMade(self):
-        pass
+def get_membership(host, port):
+    """
+    Download a membership list from the given host and port. This function
+    returns a Deferred which will be fired with the complete list or a Failure
+     if the membership could not be downloaded.
+    """
+    d = defer.Deferred()
+    from twisted.internet import reactor
+    factory = JoinClientFactory(d)
+    reactor.connectTCP(host, port, factory)
+    return d
+
+class JoinClientProtocol(protocol.Protocol):
+    membership = ''
+    def dataReceived(self, data):
+        self.membership += data
+
     def connectionLost(self, reason):
-        pass
+        self.factory.transfer_finished(self.membership)
 
 class JoinClientFactory(protocol.ClientFactory):
-    protocol = joinClient
+    protocol = JoinClientProtocol
+
+    def __init__(self, deferred):
+        self.deferred = deferred
+
+    def transfer_finished(self, membership):
+        if self.deferred is not None:
+            d, self.deferred = self.deferred, None
+            d.callback(membership)
+
+    def clientConnectionFailed(self, connector, reason):
+        if self.deferred is not None:
+            d, self.deferred = self.deferred, None
+            d.errback(reason)
 
 
 
