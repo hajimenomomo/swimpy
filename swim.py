@@ -9,6 +9,8 @@ from random import shuffle
 from twisted.internet import reactor, protocol, defer
 from twisted.python import log
 
+def show(x):
+    print x
 
 def format_address(host, port):
     if host and port:
@@ -68,9 +70,22 @@ class Host(object):
     def __ne__(self, other):
         return not self.__eq__(other)
 
+class Notification:
+    pass
+
+class NotificationStorage:
+    N_RETRANSMIT = 3
+
+    def __init__(self):
+        self.notifications = []
+        self.counters = []
+
+    def __repr__(self):
+        return str(self.notifications)
 
 class MemberStorage(object):
-    members = []
+    def __init__(self):
+        self.members = []
 
     @property
     def serialized(self):
@@ -80,12 +95,13 @@ class MemberStorage(object):
         return result
 
     def deserialize(self, data):
-        buffer, data = data[:22], data[22:]
+        if len(data) % 22 != 0:
+            return
         while (len(data)!=0):
+            buffer, data = data[:22], data[22:]
             host = Host()
             host.deserialize(buffer)
             self.host_alive(host)
-            buffer, data = data[:22], data[22:]
 
 
 
@@ -206,18 +222,27 @@ class JoinServerProtocol(protocol.Protocol):
     This class is used to transfer the membership list over TCP
     after a peer joins
     """
-    def __init__(self, membership):
-        self.membership = membership
 
     def connectionMade(self):
-        self.transport.write(self.membership.serialized)
+        self.transport.write(self.factory.membership.serialized)
+
+        time.sleep(1)
         self.transport.loseConnection()
 
-class JoinServerFactory(protocol.Protocol):
+    def connectionLost(self, reason):
+        print 'transfer finished'
+
+
+
+class JoinServerFactory(protocol.Factory):
     """
     Factory class for the Join Server
     """
     protocol = JoinServerProtocol
+
+    def __init__(self, membership):
+        self.membership = membership
+
 
 
 def get_membership(host, port):
@@ -227,18 +252,44 @@ def get_membership(host, port):
      if the membership could not be downloaded.
     """
     d = defer.Deferred()
-    from twisted.internet import reactor
     factory = JoinClientFactory(d)
+    d.addCallbacks(got_membership,transfer_failed)
     reactor.connectTCP(host, port, factory)
     return d
+
+def got_membership(data):
+    print 'got_membership  %d\n' % len(data)
+    m = MemberStorage()
+    m.deserialize(data)
+    print m.show_hosts()
+    print len(m.serialized)
+    return m
+
+def transfer_failed(failure):
+    print 'Failed'
+
+
+def serve_membership():
+    m = MemberStorage()
+    m.host_alive(Host(port=8153))
+    m.host_alive(Host(port=8128))
+    m.host_alive(Host(addr='8.8.8.8'))
+    print m.show_hosts()
+    factory = JoinServerFactory(m)
+    reactor.listenTCP(8200, factory)
+    reactor.run()
+
+
 
 class JoinClientProtocol(protocol.Protocol):
     membership = ''
     def dataReceived(self, data):
         self.membership += data
+        print len(data)
 
     def connectionLost(self, reason):
         self.factory.transfer_finished(self.membership)
+
 
 class JoinClientFactory(protocol.ClientFactory):
     protocol = JoinClientProtocol
@@ -247,11 +298,13 @@ class JoinClientFactory(protocol.ClientFactory):
         self.deferred = deferred
 
     def transfer_finished(self, membership):
+        print 'factory transfer finished'
         if self.deferred is not None:
             d, self.deferred = self.deferred, None
             d.callback(membership)
 
     def clientConnectionFailed(self, connector, reason):
+        print 'client connection failed'
         if self.deferred is not None:
             d, self.deferred = self.deferred, None
             d.errback(reason)
@@ -260,5 +313,4 @@ class JoinClientFactory(protocol.ClientFactory):
 
 if __name__ == '__main__':
     #Parser Initialization
-    reactor.listenUDP(8200, SWIMProtocol())
-    reactor.run()
+    pass
