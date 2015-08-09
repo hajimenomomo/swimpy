@@ -70,10 +70,38 @@ class Host(object):
     def __ne__(self, other):
         return not self.__eq__(other)
 
+
+
 class Notification:
-    pass
+    """
+    This class represents a notification to forward to other peers in the network
+    """
+
+    JOIN = "\xF0"
+    LEAVE = "\xF1"
+    DOWN = "\xF2"
+    NOTIF_TYPES = [JOIN, LEAVE, DOWN] #Possibility of adding new notification types
+
+    def __init__(self, type, host):
+        self.type = type
+        self.host = host
+
+    @property
+    def serialized(self):
+        return struct.pack("!1s22s", self.type, self.host.serialized)
+
+    def deserialize(self, data):
+        type, host_data = struct.unpack("!1s22s", data)
+        self.type = type
+        self.host = Host()
+        self.host.deserialize(host_data)
+
+
 
 class NotificationStorage:
+    """
+    This class handles the storage and forwarding of status changes inside the memnbership network
+    """
     N_RETRANSMIT = 3
 
     def __init__(self):
@@ -83,7 +111,16 @@ class NotificationStorage:
     def __repr__(self):
         return str(self.notifications)
 
+    def get_notification(self):
+        for n in self.notifications:
+            self.counters[self.notifications.index(n)] -=1
+
+            if(self.counters[self.notifications.index(n)] == 0):
+                self.notifications.remove(n)
+            yield n
+
 class MemberStorage(object):
+    LEN_HOST = len(Host().serialized)
     def __init__(self):
         self.members = []
 
@@ -95,7 +132,7 @@ class MemberStorage(object):
         return result
 
     def deserialize(self, data):
-        if len(data) % 22 != 0:
+        if len(data) % self.LEN_HOST != 0:
             return
         while (len(data)!=0):
             buffer, data = data[:22], data[22:]
@@ -225,8 +262,6 @@ class JoinServerProtocol(protocol.Protocol):
 
     def connectionMade(self):
         self.transport.write(self.factory.membership.serialized)
-
-        time.sleep(1)
         self.transport.loseConnection()
 
     def connectionLost(self, reason):
@@ -258,7 +293,6 @@ def get_membership(host, port):
     return d
 
 def got_membership(data):
-    print 'got_membership  %d\n' % len(data)
     m = MemberStorage()
     m.deserialize(data)
     print m.show_hosts()
@@ -266,7 +300,7 @@ def got_membership(data):
     return m
 
 def transfer_failed(failure):
-    print 'Failed'
+    print 'Failed Join Membership Transfer'
 
 
 def serve_membership():
