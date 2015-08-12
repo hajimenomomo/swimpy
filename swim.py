@@ -5,12 +5,10 @@ A SWIM Failure Detector Implementation by Mohamed Messaad
 #Python Imports
 import argparse, time, uuid, socket, struct
 from random import shuffle
+from heapq import nlargest
 #Twisted Imports
 from twisted.internet import reactor, protocol, defer
 from twisted.python import log
-
-def show(x):
-    print x
 
 def format_address(host, port):
     if host and port:
@@ -39,8 +37,111 @@ def parse_args():
 
     return args
 
+class Notification:
+    """
+    This class represents a notification to forward to other peers in the network
+    """
+
+    NOTIF_TYPES = dict(JOIN="\xF0", LEAVE = "\xF1", DOWN = "\xF2") #Possibility of adding new notification types
+
+    def __init__(self, type="\xF0", host=None):
+        if type not in self.NOTIF_TYPES.values():  #Control the input of type
+            type = self.NOTIF_TYPES['JOIN']
+        self.type = type
+        self.host = host
+
+    @property
+    def serialized(self):
+        return struct.pack("!1s22s", self.type, self.host.serialized)
+
+    def deserialize(self, data):
+        type, host_data = struct.unpack("!1s22s", data)
+        self.type = type
+        self.host = Host()
+        self.host.deserialize(host_data)
+
+    def __repr__(self):
+        for k,v in self.NOTIF_TYPES.items():
+            if self.type == v:
+                str_type = k
+        return "%s, %s " % (str_type, str(self.host))
+
+    def __eq__(self, other):
+        return repr(other) == repr(self)
+
+
+
+class NotificationStorage:
+    """
+    This class handles the storage and forwarding of status notifications
+    """
+    N_RETRANSMIT = 3
+    LEN_NOTIF = len(Notification().serialized)
+    PIGGYBACK_PER_MESSAGE = 8
+
+    def __init__(self):
+        self.notifications = []
+        self.counters = []
+
+    def __repr__(self):
+        return str(self.notifications)
+
+    def get_notification(self):
+        for n in self.notifications:
+            self.counters[self.notifications.index(n)] -=1
+
+            if(self.counters[self.notifications.index(n)] == 0):
+                del self.counters[self.notifications.index(n)]
+                self.notifications.remove(n)
+
+
+    def add_notification(self, notification):
+        if notification in self.notifications:
+            return
+        self.notifications.append(notification)
+        self.counters.append(self.N_RETRANSMIT)
+
+    @property
+    def serialized(self):
+        result = ''
+        for n in self.notifications:
+            result += n.serialized
+        return result
+
+    def deserialize(self, data):
+        if len(data) % self.LEN_NOTIF != 0:
+            return
+        while (len(data)!=0):
+            buffer, data = data[:self.LEN_NOTIF], data[self.LEN_NOTIF:]
+            notif = Notification()
+            notif.deserialize(buffer)
+            self.add_notification(notif)
+
+    def notifications_to_piggyback(self):
+        """
+        This method returns the least piggybacked notifications in a network serialized form
+        """
+        indexes_to_piggyback = nlargest(4, range(len(self.counters)), key=self.counters.__getitem__)
+        res = ''
+        for i in indexes_to_piggyback:
+            res += self.notifications[i].serialized
+            self.counters[i] -=1
+            if self.counters[i] == 0:
+                del self.counters[i]
+                del self.notifications[i]
+
+        return res
+
+
+
+
+
+
 
 class Host(object):
+    """
+    This class represents a member of the membership network
+    """
 
     def __init__(self, process_id = uuid.uuid1(), addr='127.0.0.1', port=8000): # Pad processId for serialization
         self.processId = process_id
@@ -70,57 +171,12 @@ class Host(object):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-
-
-class Notification:
-    """
-    This class represents a notification to forward to other peers in the network
-    """
-
-    JOIN = "\xF0"
-    LEAVE = "\xF1"
-    DOWN = "\xF2"
-    NOTIF_TYPES = [JOIN, LEAVE, DOWN] #Possibility of adding new notification types
-
-    def __init__(self, type, host):
-        self.type = type
-        self.host = host
-
-    @property
-    def serialized(self):
-        return struct.pack("!1s22s", self.type, self.host.serialized)
-
-    def deserialize(self, data):
-        type, host_data = struct.unpack("!1s22s", data)
-        self.type = type
-        self.host = Host()
-        self.host.deserialize(host_data)
-
-
-
-class NotificationStorage:
-    """
-    This class handles the storage and forwarding of status changes inside the memnbership network
-    """
-    N_RETRANSMIT = 3
-
-    def __init__(self):
-        self.notifications = []
-        self.counters = []
-
-    def __repr__(self):
-        return str(self.notifications)
-
-    def get_notification(self):
-        for n in self.notifications:
-            self.counters[self.notifications.index(n)] -=1
-
-            if(self.counters[self.notifications.index(n)] == 0):
-                self.notifications.remove(n)
-            yield n
-
 class MemberStorage(object):
+    """
+    This class implements a membership storage
+    """
     LEN_HOST = len(Host().serialized)
+
     def __init__(self):
         self.members = []
 
@@ -135,7 +191,7 @@ class MemberStorage(object):
         if len(data) % self.LEN_HOST != 0:
             return
         while (len(data)!=0):
-            buffer, data = data[:22], data[22:]
+            buffer, data = data[:self.LEN_HOST], data[self.LEN_HOST:]
             host = Host()
             host.deserialize(buffer)
             self.host_alive(host)
@@ -174,7 +230,7 @@ class SWIMProtocol(protocol.DatagramProtocol):
     #Protocol parameters
     T_ROUND = 1
     K_SUBGROUP_SIZE = 4
-
+    PING_TIMEOUT = 0.5
     #SWIM Protocol Header
     SWIM_PROTO = "\xDE\xED"
 
@@ -203,17 +259,19 @@ class SWIMProtocol(protocol.DatagramProtocol):
         header, data = data[:1], data[1:]
 
         if header == self.PING:
-            pass
+            self.ack(host, port)
         elif header == self.ACK:
             pass
         elif header == self.PING_REQ:
-            pass
+            self.ping(host, port)
         elif header == self.JOIN:
+
             pass
         elif header == self.LEAVE:
             pass
         else:
-            return
+            pass
+
 
     def stopProtocol(self):
         #Notify other nodes with a LEAVE message
@@ -225,13 +283,15 @@ class SWIMProtocol(protocol.DatagramProtocol):
     def join(host):
         pass
 
-    def ping(self, (host,port)):
+    def ping(self, host, port, timeout=PING_TIMEOUT):
         ping_message = self.SWIM_PROTO + self.PING
         ping_deferred = defer.Deferred()
+        self.transport.write(ping_message, (host,port))
         return ping_deferred
 
-    def ack(self, (host, port)):
+    def ack(self, host, port):
         ack_message = self.SWIM_PROTO + self.ACK
+        self.transport.write(ack_message, (host,port))
 
     def pingReq(self, host):
         pass
@@ -248,11 +308,17 @@ class SWIMProtocol(protocol.DatagramProtocol):
     def handlePingReq(self, data, (host, port)):
         pass
 
-    def makeNotif(type, host):
-        pass
+    def join(self, host, port):
+        join_message = self.SWIM_PROTO+self.JOIN
+        self.transport.write(join_message, (host,port))
+
+    def ping_timeout(self):
+
+        return
 
 
 
+# The next two classes are used to transfer raliably the membership list during the Join procedure
 
 class JoinServerProtocol(protocol.Protocol):
     """
