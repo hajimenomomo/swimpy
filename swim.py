@@ -7,7 +7,7 @@ import argparse, time, uuid, socket, struct
 from random import shuffle
 from heapq import nlargest
 #Twisted Imports
-from twisted.internet import reactor, protocol, defer
+from twisted.internet import protocol, defer, task
 from twisted.python import log
 
 def format_address(host, port):
@@ -36,103 +36,6 @@ def parse_args():
         return host, int(port)
 
     return args
-
-
-
-class Notification:
-    """
-    This class represents a notification to forward to other peers in the network
-    """
-
-    NOTIF_TYPES = dict(JOIN="\xF0", LEAVE = "\xF1", DOWN = "\xF2") #Possibility of adding new notification types
-
-    def __init__(self, type="\xF0", host=None):
-        if type not in self.NOTIF_TYPES.values():  #Control the input of type
-            type = self.NOTIF_TYPES['JOIN']
-        self.type = type
-        self.host = host
-
-    @property
-    def serialized(self):
-        return struct.pack("!1s22s", self.type, self.host.serialized)
-
-    def deserialize(self, data):
-        type, host_data = struct.unpack("!1s22s", data)
-        self.type = type
-        self.host = Host()
-        self.host.deserialize(host_data)
-
-    def __repr__(self):
-        for k,v in self.NOTIF_TYPES.items():
-            if self.type == v:
-                str_type = k
-        return "%s, %s " % (str_type, str(self.host))
-
-    def __eq__(self, other):
-        return repr(other) == repr(self)
-
-
-
-class NotificationStorage:
-    """
-    This class handles the storage and forwarding logic of status notifications
-    """
-    N_RETRANSMIT = 3 # Number of notification retransmissions (typically 3logN with N nodes)
-    LEN_NOTIF = len(Notification().serialized)
-    PIGGYBACK_PER_MESSAGE = 8 # Number of notifications to piggyback over a single protocol message
-
-    def __init__(self):
-        self.notifications = []
-        self.counters = []
-
-    def __repr__(self):
-        return str(self.notifications)
-
-    def get_notification(self):
-        for n in self.notifications:
-            self.counters[self.notifications.index(n)] -=1
-
-            if(self.counters[self.notifications.index(n)] == 0):
-                del self.counters[self.notifications.index(n)]
-                self.notifications.remove(n)
-
-
-    def add_notification(self, notification):
-        if notification in self.notifications:
-            return
-        self.notifications.append(notification)
-        self.counters.append(self.N_RETRANSMIT)
-
-    @property
-    def serialized(self):
-        result = ''
-        for n in self.notifications:
-            result += n.serialized
-        return result
-
-    def deserialize(self, data):
-        if len(data) % self.LEN_NOTIF != 0:
-            return
-        while (len(data)!=0):
-            buffer, data = data[:self.LEN_NOTIF], data[self.LEN_NOTIF:]
-            notif = Notification()
-            notif.deserialize(buffer)
-            self.add_notification(notif)
-
-    def notifications_to_piggyback(self):
-        """
-        This method returns the least piggybacked notifications in a network serialized form
-        """
-        indexes_to_piggyback = nlargest(4, range(len(self.counters)), key=self.counters.__getitem__)
-        res = ''
-        for i in indexes_to_piggyback:
-            res += self.notifications[i].serialized
-            self.counters[i] -=1
-            if self.counters[i] == 0:
-                del self.counters[i]
-                del self.notifications[i]
-
-        return res
 
 
 class Host(object):
@@ -213,6 +116,105 @@ class MemberStorage(object):
         return str(self.members)
 
 
+class Notification(object):
+    """
+    This class represents a notification to forward to other peers in the network
+    """
+
+    NOTIF_TYPES = dict(JOIN="\xF0", LEAVE = "\xF1", DOWN = "\xF2") #Possibility of adding new notification types
+
+    def __init__(self, type="\xF0", host=Host()):
+        if type not in self.NOTIF_TYPES.values():  #Control the input of type
+            type = self.NOTIF_TYPES['JOIN']
+        self.type = type
+        self.host = host
+
+    @property
+    def serialized(self):
+        return struct.pack("!1s22s", self.type, self.host.serialized)
+
+    def deserialize(self, data):
+        type, host_data = struct.unpack("!1s22s", data)
+        self.type = type
+        self.host = Host()
+        self.host.deserialize(host_data)
+
+    def __repr__(self):
+        for k,v in self.NOTIF_TYPES.items():
+            if self.type == v:
+                str_type = k
+        return "%s, %s " % (str_type, str(self.host))
+
+    def __eq__(self, other):
+        return repr(other) == repr(self)
+
+
+
+class NotificationStorage(object):
+    """
+    This class handles the storage and forwarding logic of status notifications
+    """
+    N_RETRANSMIT = 3 # Number of notification retransmissions (typically 3logN with N nodes)
+    LEN_NOTIF = len(Notification().serialized)
+    PIGGYBACK_PER_MESSAGE = 8 # Number of notifications to piggyback over a single protocol message
+
+    def __init__(self):
+        self.notifications = []
+        self.counters = []
+
+    def __repr__(self):
+        return str(self.notifications)
+
+    def get_notification(self):
+        for n in self.notifications:
+            self.counters[self.notifications.index(n)] -=1
+
+            if(self.counters[self.notifications.index(n)] == 0):
+                del self.counters[self.notifications.index(n)]
+                self.notifications.remove(n)
+
+
+    def add_notification(self, notification):
+        if notification in self.notifications:
+            return
+        self.notifications.append(notification)
+        self.counters.append(self.N_RETRANSMIT)
+
+    @property
+    def serialized(self):
+        result = ''
+        for n in self.notifications:
+            result += n.serialized
+        return result
+
+    def deserialize(self, data):
+        if len(data) % self.LEN_NOTIF != 0:
+            return
+        while (len(data)!=0):
+            buffer, data = data[:self.LEN_NOTIF], data[self.LEN_NOTIF:]
+            notif = Notification()
+            notif.deserialize(buffer)
+            self.add_notification(notif)
+
+    def notifications_to_piggyback(self):
+        """
+        This method returns the least piggybacked notifications in a network serialized form
+        """
+        indexes_to_piggyback = nlargest(4, range(len(self.counters)), key=self.counters.__getitem__)
+        res = ''
+        for i in indexes_to_piggyback:
+            res += self.notifications[i].serialized
+            self.counters[i] -=1
+            if self.counters[i] == 0:
+                del self.counters[i]
+                del self.notifications[i]
+
+        return res
+
+
+
+
+
 class SWIMProtocol(protocol.DatagramProtocol):
     #Protocol parameters
     T_ROUND = 1
@@ -246,14 +248,21 @@ class SWIMProtocol(protocol.DatagramProtocol):
 
         self.handleMessage(message, (host, port))
 
+    def protocolPeriod(self):
+        print 'protoPeriod'
+        pass
 
     def stopProtocol(self):
         #Notify other nodes with a LEAVE message
         pass
 
-    def startProtocol(self, host):
+    def startProtocol(self):
         #Inititate protocol periods
-        pass
+        print 'Protocol started'
+        from twisted.internet import reactor
+        reactor.callWhenRunning(self.protocolPeriod())
+        reactor.run()
+
 
     def join(host):
         pass
@@ -284,6 +293,9 @@ class SWIMProtocol(protocol.DatagramProtocol):
         self.transport.write(ping_message, (host,port))
         return ping_deferred
 
+    def onPingTimeout(self):
+        pass
+
     def ack(self, host, port):
         ack_message = self.SWIM_PROTO + self.ACK
         self.transport.write(ack_message, (host,port))
@@ -297,9 +309,6 @@ class SWIMProtocol(protocol.DatagramProtocol):
         join_message = self.SWIM_PROTO + self.JOIN
         self.transport.write(join_message, (host,port))
 
-    def ping_timeout(self):
-
-        return
 
 
 
@@ -359,45 +368,9 @@ class JoinClientFactory(protocol.ClientFactory):
             d.errback(reason)
 
 
-def get_membership(host, port):
-    """
-    Download a membership list from the given host and port. This function
-    returns a Deferred which will be fired with the complete list or a Failure
-     if the membership could not be downloaded.
-    """
-    d = defer.Deferred()
-    factory = JoinClientFactory(d)
-    d.addCallbacks(got_membership,transfer_failed)
-    reactor.connectTCP(host, port, factory)
-    return d
-
-def got_membership(data):
-    m = MemberStorage()
-    m.deserialize(data)
-    print m.show_hosts()
-    print len(m.serialized)
-    return m
-
-def transfer_failed(failure):
-    print 'Failed Join Membership Transfer'
-
-
-def serve_membership():
-    m = MemberStorage()
-    m.host_alive(Host(port=8153))
-    m.host_alive(Host(port=8128))
-    m.host_alive(Host(addr='8.8.8.8'))
-    print m.show_hosts()
-    factory = JoinServerFactory(m)
-    reactor.listenTCP(8200, factory)
-    reactor.run()
-
-
-
-
-
 
 
 if __name__ == '__main__':
-    #Parser Initialization
-    pass
+    proto = SWIMProtocol()
+    print 'lol'
+    reactor.listenUDP(8000, proto)
