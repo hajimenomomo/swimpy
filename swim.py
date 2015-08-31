@@ -37,6 +37,8 @@ def parse_args():
 
     return args
 
+
+
 class Notification:
     """
     This class represents a notification to forward to other peers in the network
@@ -73,11 +75,11 @@ class Notification:
 
 class NotificationStorage:
     """
-    This class handles the storage and forwarding of status notifications
+    This class handles the storage and forwarding logic of status notifications
     """
-    N_RETRANSMIT = 3
+    N_RETRANSMIT = 3 # Number of notification retransmissions (typically 3logN with N nodes)
     LEN_NOTIF = len(Notification().serialized)
-    PIGGYBACK_PER_MESSAGE = 8
+    PIGGYBACK_PER_MESSAGE = 8 # Number of notifications to piggyback over a single protocol message
 
     def __init__(self):
         self.notifications = []
@@ -133,11 +135,6 @@ class NotificationStorage:
         return res
 
 
-
-
-
-
-
 class Host(object):
     """
     This class represents a member of the membership network
@@ -180,6 +177,9 @@ class MemberStorage(object):
     def __init__(self):
         self.members = []
 
+    """
+    Serialized is defined as a property to ease its use
+    """
     @property
     def serialized(self):
         result = ''
@@ -212,19 +212,6 @@ class MemberStorage(object):
     def show_hosts(self):
         return str(self.members)
 
-"""
-class SWIMProcess(object):
-    _members = []
-    processId = uuid.uuid1()
-
-    def __init__(self, port):
-        self.port = port
-
-    def run(self):
-        reactor.listenUDP(self.port, SWIMProtocol())
-        print "server listening on port %d" % self.port
-        reactor.run()
-"""
 
 class SWIMProtocol(protocol.DatagramProtocol):
     #Protocol parameters
@@ -244,19 +231,38 @@ class SWIMProtocol(protocol.DatagramProtocol):
     #Notification header, appended after message type
     NOTIF = "\xF0\x0D"
 
-    #Data structures, hosts, notifications
+    #Data structures, hosts, notifications, pinged
 
     membership_list = MemberStorage()
-    notifications = []
+    notifications = NotificationStorage()
+    pinged_hosts = []
+    pingreqed = []
 
     def datagramReceived(self, data, (host, port)):
 
         if data[:2] != self.SWIM_PROTO: #Check if SWIM message
             return
-        data = data[2:]
-        print "SWIM Packet received"
+        message = data[2:]
 
-        header, data = data[:1], data[1:]
+        self.handleMessage(message, (host, port))
+
+
+    def stopProtocol(self):
+        #Notify other nodes with a LEAVE message
+        pass
+
+    def startProtocol(self, host):
+        #Inititate protocol periods
+        pass
+
+    def join(host):
+        pass
+
+    def processNotifications(self):
+        pass
+
+    def handleMessage(self, message, (host, port)):
+        header, data = message[:1], message[1:]
 
         if header == self.PING:
             self.ack(host, port)
@@ -272,17 +278,6 @@ class SWIMProtocol(protocol.DatagramProtocol):
         else:
             pass
 
-
-    def stopProtocol(self):
-        #Notify other nodes with a LEAVE message
-        pass
-
-    def startProtocol(self, host):
-        pass
-
-    def join(host):
-        pass
-
     def ping(self, host, port, timeout=PING_TIMEOUT):
         ping_message = self.SWIM_PROTO + self.PING
         ping_deferred = defer.Deferred()
@@ -296,20 +291,10 @@ class SWIMProtocol(protocol.DatagramProtocol):
     def pingReq(self, host):
         pass
 
-    def handleAck(self, data, (host, port)):
-        pass
 
-    def handleJoin(self, host):
-        pass
-
-    def handlePing(self, data, (host, port)):
-        pass
-
-    def handlePingReq(self, data, (host, port)):
-        pass
 
     def join(self, host, port):
-        join_message = self.SWIM_PROTO+self.JOIN
+        join_message = self.SWIM_PROTO + self.JOIN
         self.transport.write(join_message, (host,port))
 
     def ping_timeout(self):
@@ -318,7 +303,7 @@ class SWIMProtocol(protocol.DatagramProtocol):
 
 
 
-# The next two classes are used to transfer raliably the membership list during the Join procedure
+# The next two classes are used to transfer reliably the membership list during the Join procedure
 
 class JoinServerProtocol(protocol.Protocol):
     """
@@ -344,6 +329,34 @@ class JoinServerFactory(protocol.Factory):
     def __init__(self, membership):
         self.membership = membership
 
+
+class JoinClientProtocol(protocol.Protocol):
+    membership = ''
+    def dataReceived(self, data):
+        self.membership += data
+        print len(data)
+
+    def connectionLost(self, reason):
+        self.factory.transfer_finished(self.membership)
+
+
+class JoinClientFactory(protocol.ClientFactory):
+    protocol = JoinClientProtocol
+
+    def __init__(self, deferred):
+        self.deferred = deferred
+
+    def transfer_finished(self, membership):
+        print 'factory transfer finished'
+        if self.deferred is not None:
+            d, self.deferred = self.deferred, None
+            d.callback(membership)
+
+    def clientConnectionFailed(self, connector, reason):
+        print 'client connection failed'
+        if self.deferred is not None:
+            d, self.deferred = self.deferred, None
+            d.errback(reason)
 
 
 def get_membership(host, port):
@@ -381,33 +394,7 @@ def serve_membership():
 
 
 
-class JoinClientProtocol(protocol.Protocol):
-    membership = ''
-    def dataReceived(self, data):
-        self.membership += data
-        print len(data)
 
-    def connectionLost(self, reason):
-        self.factory.transfer_finished(self.membership)
-
-
-class JoinClientFactory(protocol.ClientFactory):
-    protocol = JoinClientProtocol
-
-    def __init__(self, deferred):
-        self.deferred = deferred
-
-    def transfer_finished(self, membership):
-        print 'factory transfer finished'
-        if self.deferred is not None:
-            d, self.deferred = self.deferred, None
-            d.callback(membership)
-
-    def clientConnectionFailed(self, connector, reason):
-        print 'client connection failed'
-        if self.deferred is not None:
-            d, self.deferred = self.deferred, None
-            d.errback(reason)
 
 
 
