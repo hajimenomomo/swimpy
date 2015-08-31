@@ -105,7 +105,7 @@ class MemberStorage(object):
         if host not in self.members:
             self.members.append(host)
 
-    def remove_host(self, host):
+    def host_dead(self, host):
         if host in self.members:
             self.members.remove(host)
 
@@ -116,12 +116,13 @@ class MemberStorage(object):
         return str(self.members)
 
 
+
 class Notification(object):
     """
     This class represents a notification to forward to other peers in the network
     """
-
-    NOTIF_TYPES = dict(JOIN="\xF0", LEAVE = "\xF1", DOWN = "\xF2") #Possibility of adding new notification types
+    #Possibility of adding new notification types
+    NOTIF_TYPES = dict(JOIN="\xF0", LEAVE = "\xF1", DOWN = "\xF2", SUSPECT = "\xF3")
 
     def __init__(self, type="\xF0", host=Host()):
         if type not in self.NOTIF_TYPES.values():  #Control the input of type
@@ -223,6 +224,9 @@ class SWIMProtocol(protocol.DatagramProtocol):
     #SWIM Protocol Header
     SWIM_PROTO = "\xDE\xED"
 
+    #ID of this instance
+    identifier = uuid.uuid1()
+
     #SWIM Protocol message types
     PING = "\x00"
     ACK = "\x01"
@@ -239,6 +243,7 @@ class SWIMProtocol(protocol.DatagramProtocol):
     notifications = NotificationStorage()
     pinged_hosts = []
     pingreqed = []
+    n_round = 0
 
     def datagramReceived(self, data, (host, port)):
 
@@ -249,8 +254,8 @@ class SWIMProtocol(protocol.DatagramProtocol):
         self.handleMessage(message, (host, port))
 
     def protocolPeriod(self):
-        print 'protoPeriod'
-        pass
+        print 'protoPeriod %d, ID: %s' % (self.n_round, str(self.identifier))
+        self.n_round+=1
 
     def stopProtocol(self):
         #Notify other nodes with a LEAVE message
@@ -259,9 +264,9 @@ class SWIMProtocol(protocol.DatagramProtocol):
     def startProtocol(self):
         #Inititate protocol periods
         print 'Protocol started'
-        from twisted.internet import reactor
-        reactor.callWhenRunning(self.protocolPeriod())
-        reactor.run()
+        l = task.LoopingCall(self.protocolPeriod)
+        l.start(self.T_ROUND)
+        self.leave('127.0.0.1', 8000)
 
 
     def join(host):
@@ -280,10 +285,11 @@ class SWIMProtocol(protocol.DatagramProtocol):
         elif header == self.PING_REQ:
             self.ping(host, port)
         elif header == self.JOIN:
-
+            #Join Server
             pass
         elif header == self.LEAVE:
-            pass
+            unpack_tuple = struct.unpack('!16s', data)
+            self.membership_list.host_dead(Host(uuid.UUID(unpack_tuple[0]), host, port))
         else:
             pass
 
@@ -301,18 +307,22 @@ class SWIMProtocol(protocol.DatagramProtocol):
         self.transport.write(ack_message, (host,port))
 
     def pingReq(self, host):
-        pass
-
+        pingreq_message = self.SWIM_PROTO + self.PING_REQ + self.identifier
 
 
     def join(self, host, port):
-        join_message = self.SWIM_PROTO + self.JOIN
+        join_message = self.SWIM_PROTO + self.JOIN + self.identifier
         self.transport.write(join_message, (host,port))
 
+    def leave(self, host, port):
+        leave_message = self.SWIM_PROTO + self.LEAVE + struct.pack('!16s', self.identifier.bytes)
+        self.transport.write(leave_message, (host, port))
 
 
 
-# The next two classes are used to transfer reliably the membership list during the Join procedure
+
+
+# The next two protocols are used to transfer reliably the membership list during the Join procedure
 
 class JoinServerProtocol(protocol.Protocol):
     """
@@ -328,7 +338,6 @@ class JoinServerProtocol(protocol.Protocol):
         print 'transfer finished'
 
 
-
 class JoinServerFactory(protocol.Factory):
     """
     Factory class for the Join Server
@@ -340,6 +349,9 @@ class JoinServerFactory(protocol.Factory):
 
 
 class JoinClientProtocol(protocol.Protocol):
+    """
+    This Client protocol is used to receive a membership list when trying to join a SWIMpy Group
+    """
     membership = ''
     def dataReceived(self, data):
         self.membership += data
@@ -350,6 +362,9 @@ class JoinClientProtocol(protocol.Protocol):
 
 
 class JoinClientFactory(protocol.ClientFactory):
+    """
+    This class builds Join Client Protocols
+    """
     protocol = JoinClientProtocol
 
     def __init__(self, deferred):
@@ -371,6 +386,8 @@ class JoinClientFactory(protocol.ClientFactory):
 
 
 if __name__ == '__main__':
+    from twisted.internet import reactor
     proto = SWIMProtocol()
     print 'lol'
-    reactor.listenUDP(8000, proto)
+    reactor.listenUDP(8001, proto)
+    reactor.run()
