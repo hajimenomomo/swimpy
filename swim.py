@@ -4,7 +4,7 @@ A SWIM Failure Detector Implementation by Mohamed Messaad
 
 #Python Imports
 import argparse, time, uuid, socket, struct
-from random import shuffle
+from random import shuffle, choice
 from heapq import nlargest
 #Twisted Imports
 from twisted.internet import protocol, defer, task
@@ -21,21 +21,22 @@ def check_address(addr):
         except socket.error:
             return '127.0.0.1'
 
+#Parses an adress formatted as host:port
+def parse_address(addr):
+    if ':' not in addr:
+        host = '127.0.0.1'
+        port = addr
+    else:
+        host, port = addr.split(':', 1)
+    return host, int(port)
+
 def parse_args():
-    parser = argparse.argumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument("-p", help="server listening port (UDP)", type=int)
-    parser.add_argument("addr", help="remote address")
+    #parser.add_argument("addr", help="remote address")
     args = parser.parse_args()
-
-    def parse_address(addr):
-        if ':' not in addr:
-            host = '127.0.0.1'
-            port = addr
-        else:
-            host, port = addr.split(':', 1)
-        return host, int(port)
-
     return args
+
 
 
 class Host(object):
@@ -99,7 +100,19 @@ class MemberStorage(object):
             host.deserialize(buffer)
             self.host_alive(host)
 
-
+    def get_n_random(self, n):
+        """
+        Returns a list containing n random members
+        """
+        if n >= len(self.members):
+            return self.members
+        l = []
+        list_to_pick_from = list(self.members)
+        while (len(l)<n):
+            picked_member = choice(list_to_pick_from)
+            l.append(picked_member)
+            list_to_pick_from.remove(picked_member)
+        return l
 
     def host_alive(self, host):
         if host not in self.members:
@@ -245,6 +258,9 @@ class SWIMProtocol(protocol.DatagramProtocol):
     pingreqed = []
     n_round = 0
 
+    #State: Have we joined yet ?
+    joined = False
+
     def datagramReceived(self, data, (host, port)):
 
         if data[:2] != self.SWIM_PROTO: #Check if SWIM message
@@ -254,7 +270,10 @@ class SWIMProtocol(protocol.DatagramProtocol):
         self.handleMessage(message, (host, port))
 
     def protocolPeriod(self):
-        print 'protoPeriod %d, ID: %s' % (self.n_round, str(self.identifier))
+        if not self.joined:
+            return
+        #print 'protoPeriod %d, ID: %s' % (self.n_round, str(self.identifier))
+        #print self.pinged_hosts
         self.n_round+=1
 
     def stopProtocol(self):
@@ -266,27 +285,29 @@ class SWIMProtocol(protocol.DatagramProtocol):
         print 'Protocol started'
         l = task.LoopingCall(self.protocolPeriod)
         l.start(self.T_ROUND)
-        self.leave('127.0.0.1', 8000)
+        self.pinged_hosts.append(self.ping('127.0.0.1', 8000))
 
 
-    def join(host):
-        pass
+    def join(self, host, port):
+        join_message = self.SWIM_PROTO + self.JOIN + self.identifier
 
     def processNotifications(self):
         pass
 
     def handleMessage(self, message, (host, port)):
         header, data = message[:1], message[1:]
+        remote_id_bytes, data = data[:16], data[16:]
 
         if header == self.PING:
+            print 'ping received, sending ack'
             self.ack(host, port)
         elif header == self.ACK:
-            pass
+            self.cancelPingTimeout()
+            print 'ack received'
         elif header == self.PING_REQ:
             self.ping(host, port)
         elif header == self.JOIN:
-            #Join Server
-            pass
+            self.membership_list.host_alive()
         elif header == self.LEAVE:
             unpack_tuple = struct.unpack('!16s', data)
             self.membership_list.host_dead(Host(uuid.UUID(unpack_tuple[0]), host, port))
@@ -294,28 +315,34 @@ class SWIMProtocol(protocol.DatagramProtocol):
             pass
 
     def ping(self, host, port, timeout=PING_TIMEOUT):
-        ping_message = self.SWIM_PROTO + self.PING
+        ping_message = self.SWIM_PROTO + self.PING + self.identifier.bytes
         ping_deferred = defer.Deferred()
+        self.ping_timeout_call = reactor.callLater(self.PING_TIMEOUT, self.onPingTimeout)
         self.transport.write(ping_message, (host,port))
         return ping_deferred
 
     def onPingTimeout(self):
-        pass
+        print 'Ping Timeout'
+
+    def cancelPingTimeout(self):
+        if self.ping_timeout_call is not None:
+            call, self.ping_timeout_call = self.ping_timeout_call, None
+            call.cancel()
 
     def ack(self, host, port):
-        ack_message = self.SWIM_PROTO + self.ACK
+        ack_message = self.SWIM_PROTO + self.ACK +self.identifier.bytes
         self.transport.write(ack_message, (host,port))
 
-    def pingReq(self, host):
-        pingreq_message = self.SWIM_PROTO + self.PING_REQ + self.identifier
+    def pingReq(self, host, port, host_to_ping):
+        pingreq_message = self.SWIM_PROTO + self.PING_REQ + self.identifier.bytes
 
 
     def join(self, host, port):
-        join_message = self.SWIM_PROTO + self.JOIN + self.identifier
+        join_message = self.SWIM_PROTO + self.JOIN + self.identifier.bytes
         self.transport.write(join_message, (host,port))
 
     def leave(self, host, port):
-        leave_message = self.SWIM_PROTO + self.LEAVE + struct.pack('!16s', self.identifier.bytes)
+        leave_message = self.SWIM_PROTO + self.LEAVE + self.identifier.bytes
         self.transport.write(leave_message, (host, port))
 
 
@@ -386,8 +413,10 @@ class JoinClientFactory(protocol.ClientFactory):
 
 
 if __name__ == '__main__':
+    args = parse_args()
+    print args.p
     from twisted.internet import reactor
     proto = SWIMProtocol()
     print 'lol'
-    reactor.listenUDP(8001, proto)
+    reactor.listenUDP(args.p, proto)
     reactor.run()
